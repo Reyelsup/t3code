@@ -25,12 +25,22 @@ concurrency:
 jobs:
   build-dmg:
     name: Build macOS DMG (${{ inputs.arch || 'arm64' }})
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 40
     env:
       TARGET_ARCH: ${{ inputs.arch || 'arm64' }}
       RUST_TARGET: ${{ (inputs.arch || 'arm64') == 'x64' && 'x86_64-apple-darwin' || 'aarch64-apple-darwin' }}
     steps:
+      - name: Select Xcode 26+ (required for Apple Speech helper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcode_app="$(ls -d /Applications/Xcode_26*.app /Applications/Xcode.app 2>/dev/null | head -n 1 || true)"
+          if [[ -n "$xcode_app" ]]; then
+            sudo xcode-select -s "$xcode_app/Contents/Developer"
+          fi
+          xcodebuild -version
+          xcrun --show-sdk-version
       - name: Checkout (excluding orphaned .repos gitlinks)
         shell: bash
         env:
