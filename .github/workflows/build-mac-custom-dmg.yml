@@ -11,6 +11,14 @@ on:
         options:
           - arm64
           - x64
+      channel:
+        description: "Build branding channel (nightly matches T3 Code (Nightly).app)"
+        required: false
+        default: "nightly"
+        type: choice
+        options:
+          - nightly
+          - beta
   push:
     branches:
       - feat/mac-custom-metrics
@@ -24,11 +32,12 @@ concurrency:
 
 jobs:
   build-dmg:
-    name: Build macOS DMG (${{ inputs.arch || 'arm64' }})
+    name: Build macOS ${{ inputs.channel || 'nightly' }} DMG (${{ inputs.arch || 'arm64' }})
     runs-on: macos-26
     timeout-minutes: 40
     env:
       TARGET_ARCH: ${{ inputs.arch || 'arm64' }}
+      TARGET_CHANNEL: ${{ inputs.channel || 'nightly' }}
       RUST_TARGET: ${{ (inputs.arch || 'arm64') == 'x64' && 'x86_64-apple-darwin' || 'aarch64-apple-darwin' }}
     steps:
       - name: Select Xcode 26+ (required for Apple Speech helper)
@@ -41,6 +50,7 @@ jobs:
           fi
           xcodebuild -version
           xcrun --show-sdk-version
+
       - name: Checkout (excluding orphaned .repos gitlinks)
         shell: bash
         env:
@@ -57,6 +67,26 @@ jobs:
         uses: ./.github/actions/setup-ci-deps
         with:
           install-args: --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Compute build version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_version="$(node -p "require('./apps/desktop/package.json').version")"
+          if [[ "${TARGET_CHANNEL}" == "nightly" ]]; then
+            next_patch="$(node -e '
+              const [maj, min, pat] = process.argv[1].split("-")[0].split(".").map(Number);
+              console.log(`${maj}.${min}.${pat + 1}`);
+            ' "$base_version")"
+            stamp="$(date -u +%Y%m%d)"
+            build_version="${next_patch}-nightly.${stamp}.${GITHUB_RUN_NUMBER}"
+          else
+            build_version="$base_version"
+          fi
+          echo "value=${build_version}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${build_version}"
+          node scripts/update-release-package-versions.ts "${build_version}"
 
       - name: Cache resource monitor
         id: resource_monitor_cache
@@ -102,6 +132,7 @@ jobs:
             --platform mac \
             --target dmg \
             --arch "${{ env.TARGET_ARCH }}" \
+            --build-version "${{ steps.version.outputs.value }}" \
             --skip-build \
             --verbose
           ls -lh release/
@@ -109,7 +140,7 @@ jobs:
       - name: Upload DMG Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: t3code-mac-custom-${{ env.TARGET_ARCH }}-dmg
+          name: t3code-mac-custom-${{ env.TARGET_CHANNEL }}-${{ env.TARGET_ARCH }}-dmg
           path: release/*.dmg
           if-no-files-found: error
           retention-days: 30
@@ -118,17 +149,24 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILD_VERSION: ${{ steps.version.outputs.value }}
         run: |
           set -euo pipefail
-          TAG="mac-custom-latest"
+          if [[ "${TARGET_CHANNEL}" == "nightly" ]]; then
+            TAG="mac-custom-nightly-latest"
+            APP_NAME="T3 Code (Nightly).app"
+          else
+            TAG="mac-custom-latest"
+            APP_NAME="T3 Code (Beta).app"
+          fi
           SHORT_SHA="${GITHUB_SHA:0:7}"
-          NOTES="Mac 定制版 T3 Code（直连原版 NAS，零服务端改动）· Commit ${SHORT_SHA} · Arch: ${TARGET_ARCH}。首次打开如遇 macOS 未签名拦截，右键打开或终端执行 \`xattr -dr com.apple.quarantine \"/Applications/T3 Code (Beta).app\"\`。"
+          NOTES="Mac 定制版 T3 Code (${BUILD_VERSION}) · 直连原版 NAS，零服务端改动 · Commit ${SHORT_SHA} · Arch: ${TARGET_ARCH}。首次打开如遇 macOS 未签名拦截，终端执行 \`xattr -dr com.apple.quarantine \"/Applications/${APP_NAME}\"\`。"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "T3 Code Mac Custom (${SHORT_SHA})" --notes "$NOTES"
+            gh release edit "$TAG" --title "T3 Code Mac Custom ${BUILD_VERSION} (${SHORT_SHA})" --notes "$NOTES"
             gh release upload "$TAG" release/*.dmg --clobber
           else
             gh release create "$TAG" release/*.dmg \
-              --title "T3 Code Mac Custom (${SHORT_SHA})" \
+              --title "T3 Code Mac Custom ${BUILD_VERSION} (${SHORT_SHA})" \
               --notes "$NOTES" \
               --prerelease
           fi
