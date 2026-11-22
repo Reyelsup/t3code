@@ -11,7 +11,7 @@ import {
 } from "@t3tools/contracts";
 import { CircleAlertIcon, ChevronDownIcon, InfoIcon, SlidersHorizontalIcon } from "lucide-react";
 import { T, useGT, useLocale, useMessages, Var } from "gt-react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from "react";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
@@ -91,6 +91,7 @@ import {
 } from "./usageBreakdown";
 import {
   METRIC_OPTIONS,
+  USAGE_VIEW_OPTIONS,
   WINDOW_OPTIONS,
   resolveUsageShortcut,
   type UsageMetric,
@@ -106,9 +107,12 @@ import {
   saveUsagePagePreferences,
   type UsagePagePreferences,
 } from "./usagePagePreferences";
+import { AccountUsageDashboard } from "../../extensions/metrics/AccountUsageDashboard";
+import { AntigravityAccountsPanel } from "../../extensions/metrics/AntigravityAccountsPanel";
+import { readTurnLedger, subscribeTurnLedger } from "../../extensions/metrics/localTurnLedger";
 
 function isUsageMetric(value: string | null | undefined): value is UsageMetric {
-  return METRIC_OPTIONS.some((option) => option.value === value);
+  return USAGE_VIEW_OPTIONS.some((option) => option.value === value);
 }
 
 function isUsageWindowDays(value: number): value is UsagePagePreferences["windowDays"] {
@@ -182,15 +186,20 @@ export function UsagePage() {
   const locale = useLocale();
   const m = useMessages();
   const shortcutTitle = (
-    option: (typeof METRIC_OPTIONS)[number] | (typeof WINDOW_OPTIONS)[number],
+    option: (typeof USAGE_VIEW_OPTIONS)[number] | (typeof WINDOW_OPTIONS)[number],
   ) => {
-    const shortcut = shortcutLabelForCommand(keybindings, option.command, {
-      context: { usagePageOpen: true },
-    });
-    return shortcut
-      ? gt("{label} ({shortcut})", { label: m(option.label), shortcut })
-      : m(option.label);
+    const label = "translated" in option && !option.translated ? option.label : m(option.label);
+    const shortcut =
+      "command" in option && option.command
+        ? shortcutLabelForCommand(keybindings, option.command, {
+            context: { usagePageOpen: true },
+          })
+        : null;
+    return shortcut ? gt("{label} ({shortcut})", { label, shortcut }) : label;
   };
+  const optionLabel = (option: (typeof USAGE_VIEW_OPTIONS)[number]) =>
+    option.translated ? m(option.label) : option.label;
+  const ledgerRecords = useSyncExternalStore(subscribeTurnLedger, readTurnLedger, readTurnLedger);
   const [windowSelection, setWindowSelection] = useState(() => ({
     days: preferences.windowDays,
     window: makeWindow(
@@ -201,6 +210,9 @@ export function UsagePage() {
   }));
   const metric = preferences.metric;
   const showingLimits = metric === "limits";
+  const showingAccounts = metric === "accounts";
+  const showingAntigravity = metric === "antigravity";
+  const showingLiveQuotaView = showingLimits || showingAntigravity;
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [limitsNow, setLimitsNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
@@ -221,7 +233,7 @@ export function UsagePage() {
   const merged = shown?.merged ?? answeredUsage;
   const shownWindow = shown?.window ?? window;
   const shownHourly = shownWindow.resolution === "hour";
-  const refreshingUsage = isRefreshing && !showingLimits;
+  const refreshingUsage = isRefreshing && !showingLiveQuotaView;
   const showingKept = shown !== null && shown.window !== window;
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
   const presentationsWithProviders = useAtomValue(
@@ -249,7 +261,7 @@ export function UsagePage() {
     });
   };
   const selectMetric = (nextMetric: UsageMetric) => {
-    if (nextMetric === "limits") setLimitsNow(Date.now());
+    if (nextMetric === "limits" || nextMetric === "antigravity") setLimitsNow(Date.now());
     updatePreferences({ metric: nextMetric });
   };
   const refreshLimits = (automatic = false) =>
@@ -282,14 +294,16 @@ export function UsagePage() {
       return;
 
     const command = resolveUsageShortcut(event, keybindings);
-    const metricOption = METRIC_OPTIONS.find((option) => option.command === command);
+    const metricOption = METRIC_OPTIONS.find(
+      (option) => "command" in option && option.command === command,
+    );
     const periodOption = WINDOW_OPTIONS.find((option) => option.command === command);
     if (!metricOption && !periodOption) return;
 
     event.preventDefault();
     event.stopPropagation();
     if (metricOption) selectMetric(metricOption.value);
-    if (periodOption && !showingLimits) selectWindow(periodOption.days);
+    if (periodOption && !showingLiveQuotaView) selectWindow(periodOption.days);
   });
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window capture keydown listener for usage metric and period shortcuts
@@ -301,7 +315,7 @@ export function UsagePage() {
   const refreshWindow = () => {
     if (refreshingRef.current) return;
 
-    if (showingLimits) {
+    if (showingLiveQuotaView) {
       refreshingRef.current = true;
       setIsRefreshing(true);
       void refreshLimits().finally(() => {
@@ -341,8 +355,8 @@ export function UsagePage() {
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- refreshes provider limits from the server when the connected environment set changes
   useEffect(() => {
-    if (showingLimits && connectedLimitsEnvironments) autoRefreshLimits();
-  }, [showingLimits, connectedLimitsEnvironments]);
+    if (showingLiveQuotaView && connectedLimitsEnvironments) autoRefreshLimits();
+  }, [showingLiveQuotaView, connectedLimitsEnvironments]);
 
   const days = enumerateDays(shownWindow.sinceDay, shownWindow.untilDay);
   const hours =
@@ -368,7 +382,7 @@ export function UsagePage() {
           end: formatDayShort(shownWindow.untilDay, locale),
         });
   const windowOptionLabel = WINDOW_OPTIONS.find((option) => option.days === windowDays)?.label;
-  const metricOptionLabel = METRIC_OPTIONS.find((option) => option.value === metric)?.label;
+  const activeMetricOption = USAGE_VIEW_OPTIONS.find((option) => option.value === metric);
   const topbarContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 py-2 @4xl/usage-header:flex">
       <WorkspaceBreadcrumb ariaLabel={gt("Usage breadcrumb")} className="min-w-0">
@@ -384,7 +398,7 @@ export function UsagePage() {
             selectedEnvironments={selectedEnvironments}
             selectedEnvironmentIds={selectedEnvironmentIds}
             onSelectionChange={setSelectedEnvironmentIds}
-            showUsageStatus={!showingLimits}
+            showUsageStatus={!showingLiveQuotaView}
             refreshing={refreshingUsage}
             isPartial={isPartial}
             duplicateSources={merged.duplicateSources}
@@ -400,7 +414,7 @@ export function UsagePage() {
           />
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
-      {!showingLimits ? (
+      {!showingLiveQuotaView ? (
         <span className="hidden min-w-0 truncate text-xs text-muted-foreground @7xl/usage-header:block">
           {windowLabel}
         </span>
@@ -408,7 +422,7 @@ export function UsagePage() {
       <div className="ms-auto hidden shrink-0 items-center justify-end gap-2 @4xl/usage-header:flex">
         {/* Limits are always current, so they have no period. The period sits before the metric
             tabs so dropping it never moves them. */}
-        {showingLimits ? null : (
+        {showingLiveQuotaView ? null : (
           <ToggleGroup
             aria-label={gt("Usage period")}
             variant="segmented"
@@ -434,17 +448,17 @@ export function UsagePage() {
             if (isUsageMetric(value)) selectMetric(value);
           }}
         >
-          {METRIC_OPTIONS.map((option) => (
+          {USAGE_VIEW_OPTIONS.map((option) => (
             <Toggle key={option.value} value={option.value} title={shortcutTitle(option)}>
-              {m(option.label)}
+              {optionLabel(option)}
             </Toggle>
           ))}
         </ToggleGroup>
         <Button
           onClick={refreshWindow}
-          aria-label={showingLimits ? gt("Refresh limits") : gt("Refresh usage")}
+          aria-label={showingLiveQuotaView ? gt("Refresh limits") : gt("Refresh usage")}
           aria-busy={isRefreshing}
-          disabled={isRefreshing || (!showingLimits && !canReadDiagnostics)}
+          disabled={isRefreshing || (!showingLiveQuotaView && !canReadDiagnostics)}
           size="icon-sm"
           variant="ghost"
         >
@@ -452,7 +466,7 @@ export function UsagePage() {
         </Button>
       </div>
       <div className="ms-auto flex shrink-0 items-center justify-end gap-1 @4xl/usage-header:hidden">
-        {showingLimits ? null : (
+        {showingLiveQuotaView ? null : (
           <Select value={String(windowDays)} onValueChange={(value) => selectWindow(Number(value))}>
             <SelectTrigger
               aria-label={gt("Usage period")}
@@ -487,21 +501,21 @@ export function UsagePage() {
             variant="ghost"
             className="w-auto min-w-0"
           >
-            <SelectValue>{metricOptionLabel && m(metricOptionLabel)}</SelectValue>
+            <SelectValue>{activeMetricOption && optionLabel(activeMetricOption)}</SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
-            {METRIC_OPTIONS.map((option) => (
+            {USAGE_VIEW_OPTIONS.map((option) => (
               <SelectItem key={option.value} value={option.value} title={shortcutTitle(option)}>
-                {m(option.label)}
+                {optionLabel(option)}
               </SelectItem>
             ))}
           </SelectPopup>
         </Select>
         <Button
           onClick={refreshWindow}
-          aria-label={showingLimits ? gt("Refresh limits") : gt("Refresh usage")}
+          aria-label={showingLiveQuotaView ? gt("Refresh limits") : gt("Refresh usage")}
           aria-busy={isRefreshing}
-          disabled={isRefreshing || (!showingLimits && !canReadDiagnostics)}
+          disabled={isRefreshing || (!showingLiveQuotaView && !canReadDiagnostics)}
           size="icon-sm"
           variant="ghost"
         >
@@ -524,10 +538,10 @@ export function UsagePage() {
             {selectedEnvironments.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {environments.length === 0
-                  ? showingLimits
+                  ? showingLiveQuotaView
                     ? gt("Connect an environment to see limits.")
                     : gt("Connect an environment to see usage.")
-                  : showingLimits
+                  : showingLiveQuotaView
                     ? gt("Select an environment to see limits.")
                     : gt("Select an environment to see usage.")}
               </p>
@@ -536,6 +550,19 @@ export function UsagePage() {
                 selectedEnvironmentIds={selectedEnvironmentIds}
                 hiddenProviders={hiddenProviders}
                 now={limitsNow}
+              />
+            ) : showingAntigravity ? (
+              <AntigravityAccountsPanel
+                selectedEnvironmentIds={selectedEnvironmentIds}
+                now={limitsNow}
+              />
+            ) : showingAccounts ? (
+              <AccountUsageDashboard
+                selectedEnvironments={selectedEnvironments}
+                selectedEnvironmentIds={selectedEnvironmentIds}
+                hiddenProviders={hiddenProviders}
+                window={shownWindow}
+                ledgerRecords={ledgerRecords}
               />
             ) : shown === null ? (
               <UsageSkeleton />

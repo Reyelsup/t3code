@@ -111,6 +111,8 @@ import {
 } from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
+import { ThreadMetricsPanel } from "../extensions/metrics/ThreadMetricsPanel";
+import { ThreadMetricsPill } from "../extensions/metrics/ThreadMetricsPill";
 import {
   codexFeedbackMessage,
   deriveWorkspaceMutationId,
@@ -3811,6 +3813,20 @@ export default function ChatView(props: ChatViewProps) {
                                 activeThreadId={activeThreadId}
                                 activeThread={activeThread}
                                 activeThreadRuns={serverProjection?.runs ?? EMPTY_RUNS}
+                                metricsControl={
+                                  <ThreadMetricsPill
+                                    environmentId={environmentId}
+                                    projection={serverProjection}
+                                    providerInstanceId={activeProviderInstanceId}
+                                    driver={
+                                      providerStatuses.find(
+                                        (provider) =>
+                                          provider.instanceId === activeProviderInstanceId,
+                                      )?.driver ?? null
+                                    }
+                                    contextWindow={activeContextWindow}
+                                  />
+                                }
                                 promptHistoryEntries={timelineEntries}
                                 forceExpandedOnMobile={
                                   forceExpandedMobileComposer && isDraftHeroState
@@ -4125,6 +4141,18 @@ export default function ChatView(props: ChatViewProps) {
                     sources: serverConfig?.usageLimitSources ?? EMPTY_USAGE_LIMIT_SOURCES,
                     contextWindow: activeContextWindow,
                   }}
+                  metricsPanel={
+                    <ThreadMetricsPanel
+                      environmentId={activeThread.environmentId}
+                      projection={serverProjection}
+                      providerInstanceId={activeProviderInstanceId}
+                      driver={
+                        providerStatuses.find(
+                          (provider) => provider.instanceId === activeProviderInstanceId,
+                        )?.driver ?? null
+                      }
+                    />
+                  }
                 />
 
                 <PullRequestThreadDialogHost

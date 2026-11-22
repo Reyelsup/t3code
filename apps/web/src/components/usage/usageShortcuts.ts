@@ -3,12 +3,26 @@ import type { KeybindingCommand, ResolvedKeybindingsConfig } from "@t3tools/cont
 import type { UsageChartMetric } from "./UsageProviderChart";
 import { resolveShortcutCommand, type ShortcutEventLike } from "../../keybindings";
 
-export type UsageMetric = UsageChartMetric | "limits";
+export type UsageMetric = UsageChartMetric | "limits" | "accounts" | "antigravity";
 export const METRIC_OPTIONS = [
   { value: "cost", label: msg("Cost"), command: "usage.cost" },
   { value: "tokens", label: msg("Tokens"), command: "usage.tokens" },
   { value: "limits", label: msg("Limits"), command: "usage.limits" },
 ] as const satisfies readonly { value: UsageMetric; label: string; command: KeybindingCommand }[];
+
+export const USAGE_VIEW_OPTIONS = [
+  { value: "cost", label: msg("Cost"), command: "usage.cost", translated: true },
+  { value: "tokens", label: msg("Tokens"), command: "usage.tokens", translated: true },
+  { value: "limits", label: msg("Limits"), command: "usage.limits", translated: true },
+  // oxlint-disable-next-line t3code/no-untranslated-copy -- custom extension tab label stays untranslated to avoid diverging upstream locale files
+  { value: "accounts", label: "Accounts", translated: false },
+  { value: "antigravity", label: "Antigravity", translated: false },
+] as const satisfies readonly {
+  value: UsageMetric;
+  label: string;
+  command?: KeybindingCommand;
+  translated: boolean;
+}[];
 
 export const WINDOW_OPTIONS = [
   { days: 1, label: msg("Past 24h"), command: "usage.period.day" },

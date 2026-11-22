@@ -1,0 +1,124 @@
+name: Build Mac Custom DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "macOS architecture (arm64 for Apple Silicon, x64 for Intel)"
+        required: false
+        default: "arm64"
+        type: choice
+        options:
+          - arm64
+          - x64
+  push:
+    branches:
+      - feat/mac-custom-metrics
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-mac-custom-dmg-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-dmg:
+    name: Build macOS DMG (${{ inputs.arch || 'arm64' }})
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      TARGET_ARCH: ${{ inputs.arch || 'arm64' }}
+      RUST_TARGET: ${{ (inputs.arch || 'arm64') == 'x64' && 'x86_64-apple-darwin' || 'aarch64-apple-darwin' }}
+    steps:
+      - name: Checkout (excluding orphaned .repos gitlinks)
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+ and workspace dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Cache resource monitor
+        id: resource_monitor_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/resource-monitor/target/${{ env.RUST_TARGET }}/release/t3-resource-monitor
+          key: resource-monitor-${{ env.RUST_TARGET }}-${{ hashFiles('.cargo/config.toml', 'native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
+
+      - name: Setup Rust
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: ${{ env.RUST_TARGET }}
+
+      - name: Build resource monitor
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target "${{ env.RUST_TARGET }}"
+
+      - name: Ensure Rosetta for x64 build
+        if: env.TARGET_ARCH == 'x64'
+        shell: bash
+        run: |
+          if [[ "$(uname -m)" == "arm64" ]] && ! /usr/bin/arch -x86_64 /usr/bin/true; then
+            sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+          fi
+
+      - name: Build desktop JS & Web bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          vp run build:desktop:bundle
+
+      - name: Package macOS DMG (unsigned)
+        shell: bash
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
+        run: |
+          set -euo pipefail
+          vp run dist:desktop:artifact \
+            --platform mac \
+            --target dmg \
+            --arch "${{ env.TARGET_ARCH }}" \
+            --skip-build \
+            --verbose
+          ls -lh release/
+
+      - name: Upload DMG Artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: t3code-mac-custom-${{ env.TARGET_ARCH }}-dmg
+          path: release/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish DMG to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="mac-custom-latest"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          NOTES="Mac 定制版 T3 Code（直连原版 NAS，零服务端改动）· Commit ${SHORT_SHA} · Arch: ${TARGET_ARCH}。首次打开如遇 macOS 未签名拦截，右键打开或终端执行 \`xattr -dr com.apple.quarantine \"/Applications/T3 Code (Beta).app\"\`。"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "T3 Code Mac Custom (${SHORT_SHA})" --notes "$NOTES"
+            gh release upload "$TAG" release/*.dmg --clobber
+          else
+            gh release create "$TAG" release/*.dmg \
+              --title "T3 Code Mac Custom (${SHORT_SHA})" \
+              --notes "$NOTES" \
+              --prerelease
+          fi
