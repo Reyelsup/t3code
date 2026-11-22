@@ -19,6 +19,11 @@ on:
         options:
           - nightly
           - beta
+      build_version:
+        description: "Optional exact version override (e.g. 0.1.12-nightly.20261120.4994). Leave blank to match latest official pingdotgg/t3code Nightly."
+        required: false
+        default: ""
+        type: string
   push:
     branches:
       - feat/mac-custom-metrics
@@ -71,16 +76,23 @@ jobs:
       - name: Compute build version
         id: version
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVERRIDE_VERSION: ${{ inputs.build_version || '' }}
         run: |
           set -euo pipefail
           base_version="$(node -p "require('./apps/desktop/package.json').version")"
-          if [[ "${TARGET_CHANNEL}" == "nightly" ]]; then
-            next_patch="$(node -e '
-              const [maj, min, pat] = process.argv[1].split("-")[0].split(".").map(Number);
-              console.log(`${maj}.${min}.${pat + 1}`);
-            ' "$base_version")"
-            stamp="$(date -u +%Y%m%d)"
-            build_version="${next_patch}-nightly.${stamp}.${GITHUB_RUN_NUMBER}"
+          if [[ -n "${OVERRIDE_VERSION}" ]]; then
+            build_version="${OVERRIDE_VERSION#v}"
+          elif [[ "${TARGET_CHANNEL}" == "nightly" ]]; then
+            # Match a real official pingdotgg/t3code Nightly tag so SSH remote provisioning
+            # downloads a real stock server archive instead of hitting 404.
+            upstream_tag="$(gh api 'repos/pingdotgg/t3code/releases?per_page=15' --jq '[.[] | select(.tag_name | test("^v.*-nightly\\.[0-9]{8}\\.[0-9]+$"))][0].tag_name')"
+            if [[ -z "${upstream_tag}" || "${upstream_tag}" == "null" ]]; then
+              echo "Failed to resolve latest official Nightly release tag from pingdotgg/t3code." >&2
+              exit 1
+            fi
+            build_version="${upstream_tag#v}"
           else
             build_version="$base_version"
           fi
